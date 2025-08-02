@@ -14,7 +14,7 @@ class BPETokenizer:
     def __init__(self):
         pass
 
-    def pretokenize(self, input_text: str, special_tokens: list[str]) -> dict[bytes, int]:
+    def pretokenize(self, input_text: str, special_tokens: list[str]) -> dict[tuple[int, ...], int]:
         chunks = re.split('|'.join([re.escape(token) for token in special_tokens]), 
                           input_text)
         pretoken_count = defaultdict(int)
@@ -84,11 +84,9 @@ class BPETokenizer:
             pairs[pretoken[i:i + 2]] += count
         return pairs
 
-    def merge_pairs(self):
-        pass
 
-    def tokenize(self, input_path: str, vocab_size: int, special_tokens: list[str], 
-                 num_processes=4) -> tuple[dict[int, bytes], list[tuple[int, int]]]:
+    def train_bpe(self, input_path: str, vocab_size: int, special_tokens: list[str], 
+                  num_processes=4) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
 
         vocab = {}
         merges = []
@@ -128,8 +126,8 @@ class BPETokenizer:
                 new_pretoken = self.replace_pair_in_tuple(freq_pair, new_token_id, pretoken)
                 new_pretoken_count[new_pretoken] += count
             pretoken_count = new_pretoken_count
-            merges.append(freq_pair)
-            
+            merges.append((vocab[freq_pair[0]], vocab[freq_pair[1]]))
+
         return vocab, merges
 
 
@@ -143,7 +141,8 @@ class BPETokenizer:
         while i < len(pretoken) - 1:
             if pretoken[i] == pair[0] and pretoken[i + 1] == pair[1]:
                 pretoken_list[i:i + 2] = [new_token_id]
-            i += 1
+            else:
+                i += 1
         return tuple(pretoken_list)
 
 
@@ -153,8 +152,8 @@ if __name__ == "__main__":
     input_path = "data/TinyStoriesV2-GPT4-valid.txt"
 
     tokenizer = BPETokenizer()
-    self = tokenizer
-    vocab, merges = tokenizer.tokenize(
+    # self = tokenizer
+    vocab, merges = tokenizer.train_bpe(
         input_path=input_path,
         vocab_size=1000,
         special_tokens=special_tokens,
