@@ -3,26 +3,52 @@ import regex as re
 from collections import defaultdict, Counter
 from typing import Iterator, BinaryIO, DefaultDict, Iterable
 from functools import cache
+from multiprocessing import Pool
 
 
 PAT_STR: str = \
     r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
-def pretokenize(input_text: str, special_tokens: list[str]) -> dict[tuple[int, ...], int]:
-    chunks = re.split('|'.join([re.escape(token) for token in special_tokens]), 
-                        input_text)
-    pretoken_count = defaultdict(int)
+@cache
+def word_to_id_tuple(word: bytes, len_special: int) -> tuple[int, ...]:
+    return tuple(len_special + byte for byte in word)
 
-    @cache
-    def word_to_id_tuple(word: bytes) -> tuple[int, ...]:
-        return tuple(len(special_tokens) + byte for byte in word)
+
+def chunkate(input_text: str, special_tokens: list[str]) -> list[str]:
+    return re.split('|'.join([re.escape(token) for token in special_tokens]), 
+                        input_text)
+
+def pretokenize(input_text: str, special_tokens: list[str]) -> Counter[tuple[int, ...]]:
+    chunks = chunkate(input_text, special_tokens)
+    pretoken_count = defaultdict(int)
+    len_special = len(special_tokens)
 
     for chunk in chunks:
         for match in re.finditer(PAT_STR, chunk):
             word = match.group().encode('utf-8')
-            pretoken_count[word_to_id_tuple(word)] += 1
-    return pretoken_count
+            pretoken_count[word_to_id_tuple(word, len_special)] += 1
+    return Counter(pretoken_count)
+
+
+def pretokenize_for_encoding(text: str, special_tokens: list[str]) -> list[tuple[int, ...]]:
+    chunks = chunkate(text, special_tokens)
+    pretokens = []
+    len_special = len(special_tokens)
+
+    for chunk in chunks:
+        for match in re.finditer(PAT_STR, chunk):
+            word = match.group().encode('utf-8')
+            pretokens.append(word_to_id_tuple(word, len_special))
+
+    return pretokens
+
+
+def pretokenize_chunk(input_path: str, start: int, end: int, special_tokens: list[str]) -> Counter[tuple[int, ...]]:
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+    return pretokenize(chunk, special_tokens)
 
 
 def find_chunk_boundaries(
@@ -74,6 +100,21 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
+def pretokenize_from_path(input_path: str, special_tokens: list[str], num_processes: int) -> Counter[tuple[int, ...]]:
+    with open(input_path, "rb") as f:
+        boundaries = find_chunk_boundaries(
+            f, num_processes, split_special_token="<|endoftext|>".encode("utf-8"))
+            
+    chunk_args = [(input_path, start, end, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
+
+    with Pool(processes=num_processes) as pool:
+        # Process each chunk in parallel
+        pretoken_counts = pool.starmap(pretokenize_chunk, chunk_args)
+        
+    pretoken_count = sum(pretoken_counts, Counter())    
+    return pretoken_count
+
+
 def update_pairs(pairs, pretoken: tuple[int, ...], count: int):
     for i in range(len(pretoken) - 1):
         pairs[pretoken[i:i + 2]] += count
@@ -90,26 +131,17 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str],
     for i in range(256):
         vocab[len(special_tokens) + i] = bytes([i])
 
-    pretoken_count = Counter()
 
-    with open(input_path, "rb") as f:
-        boundaries = find_chunk_boundaries(
-            f, num_processes, split_special_token="<|endoftext|>".encode("utf-8"))
-            
-        # The following is a serial implementation, but you can parallelize this 
-        # by sending each start/end pair to a set of processes.
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            # Run pre-tokenization on your chunk and store the counts for each pre-token
-            pretoken_count += Counter(pretokenize(chunk, special_tokens))
 
+    pretoken_count = pretokenize_from_path(input_path, special_tokens, num_processes)
+
+    # Initialize pairs with counts from pretoken_count
+    pairs = defaultdict(int)
+
+    for pretoken, count in pretoken_count.items():
+        pairs = update_pairs(pairs, pretoken, count)
 
     while len(vocab) < vocab_size:
-        pairs = defaultdict(int)
-
-        for pretoken, count in pretoken_count.items():
-            pairs = update_pairs(pairs, pretoken, count)
     
         if not pairs:
             breakpoint()
@@ -121,9 +153,26 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str],
         vocab[new_token_id] = vocab[freq_pair[0]] + vocab[freq_pair[1]]
 
         new_pretoken_count = Counter()
+
         for pretoken, count in pretoken_count.items():
-            new_pretoken = replace_pair_in_tuple(freq_pair, new_token_id, pretoken)
-            new_pretoken_count[new_pretoken] += count
+            if freq_pair[0] in pretoken and freq_pair[1] in pretoken:
+                old_pretoken = pretoken
+                new_pretoken = replace_pair_in_tuple(freq_pair, new_token_id, pretoken)
+
+                for i in range(len(old_pretoken) - 1):
+                    pair = old_pretoken[i:i + 2]
+                    pairs[pair] -= count
+                    if pairs[pair] == 0:
+                        del pairs[pair]
+
+                for i in range(len(new_pretoken) - 1):
+                    pair = new_pretoken[i:i + 2]
+                    pairs[pair] += count
+                new_pretoken_count[new_pretoken] += count
+            else:
+                new_pretoken_count[pretoken] += count
+
+
         pretoken_count = new_pretoken_count
         merges.append((vocab[freq_pair[0]], vocab[freq_pair[1]]))
 
@@ -134,12 +183,14 @@ def replace_pair_in_tuple(
         pair: tuple[int, int],
         new_token_id: int,
         pretoken: tuple[int, ...]) -> tuple[int, ...]:
-    pretoken_list = list(pretoken)
+    pretoken_list = []
     i = 0
-    while i < len(pretoken_list) - 1:
-        if pretoken_list[i] == pair[0] and pretoken_list[i + 1] == pair[1]:
-            pretoken_list[i:i + 2] = [new_token_id]
+    while i < len(pretoken) :
+        if i < len(pretoken) - 1 and pretoken[i] == pair[0] and pretoken[i + 1] == pair[1]:
+            pretoken_list.append(new_token_id)
+            i += 2
         else:
+            pretoken_list.append(pretoken[i])
             i += 1
     return tuple(pretoken_list)
 
@@ -191,6 +242,7 @@ class Tokenizer:
     
     
     def encode(self, text: str) -> list[int]:
+        pretokens = pretokenize_for_encoding(text, self.special_tokens)
         pass
     
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
@@ -206,10 +258,11 @@ class Tokenizer:
 if __name__ == "__main__":
     special_tokens = ["<|endoftext|>"]
     input_path = "data/TinyStoriesV2-GPT4-valid.txt"
+    vocab_size = 1024
 
     vocab, merges = train_bpe(
         input_path=input_path,
-        vocab_size=1024,
+        vocab_size=vocab_size,
         special_tokens=special_tokens,
         num_processes=4
     )
