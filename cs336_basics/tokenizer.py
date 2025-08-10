@@ -115,7 +115,7 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str],
             breakpoint()
             break
 
-        freq_pair = max(pairs, key=lambda x: (pairs[x], x))
+        freq_pair = max(pairs, key=lambda x: (pairs[x], (vocab[x[0]], vocab[x[1]])))
 
         new_token_id = len(vocab)
         vocab[new_token_id] = vocab[freq_pair[0]] + vocab[freq_pair[1]]
