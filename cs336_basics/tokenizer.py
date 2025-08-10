@@ -141,6 +141,13 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str],
     for pretoken, count in pretoken_count.items():
         pairs = update_pairs(pairs, pretoken, count)
 
+    pair_to_pretokens = defaultdict(set)
+    for pretoken, count in pretoken_count.items():
+        for i in range(len(pretoken) - 1):
+            pair = (pretoken[i], pretoken[i + 1])
+            pairs[pair] += count
+            pair_to_pretokens[pair].add(pretoken)
+
     while len(vocab) < vocab_size:
     
         if not pairs:
@@ -149,31 +156,28 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str],
 
         freq_pair = max(pairs, key=lambda x: (pairs[x], (vocab[x[0]], vocab[x[1]])))
 
+        affected_pretokens = pair_to_pretokens[freq_pair].copy()
+
         new_token_id = len(vocab)
         vocab[new_token_id] = vocab[freq_pair[0]] + vocab[freq_pair[1]]
 
-        new_pretoken_count = Counter()
 
-        for pretoken, count in pretoken_count.items():
-            if freq_pair[0] in pretoken and freq_pair[1] in pretoken:
-                old_pretoken = pretoken
-                new_pretoken = replace_pair_in_tuple(freq_pair, new_token_id, pretoken)
+        for old_pretoken in affected_pretokens:
+            new_pretoken = replace_pair_in_tuple(freq_pair, new_token_id, pretoken)
+            pretoken_count[new_pretoken] = pretoken_count.pop(old_pretoken)
 
-                for i in range(len(old_pretoken) - 1):
-                    pair = old_pretoken[i:i + 2]
-                    pairs[pair] -= count
-                    if pairs[pair] == 0:
-                        del pairs[pair]
+            for i in range(len(old_pretoken) - 1):
+                pair = old_pretoken[i:i + 2]
+                pairs[pair] -= count
+                if pairs[pair] == 0:
+                    del pairs[pair]
+                    del pair_to_pretokens[pair]
 
-                for i in range(len(new_pretoken) - 1):
-                    pair = new_pretoken[i:i + 2]
-                    pairs[pair] += count
-                new_pretoken_count[new_pretoken] += count
-            else:
-                new_pretoken_count[pretoken] += count
+            for i in range(len(new_pretoken) - 1):
+                pair = new_pretoken[i:i + 2]
+                pairs[pair] += count
+                pair_to_pretokens[pair].add(new_pretoken)
 
-
-        pretoken_count = new_pretoken_count
         merges.append((vocab[freq_pair[0]], vocab[freq_pair[1]]))
 
     return vocab, merges
