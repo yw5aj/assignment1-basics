@@ -137,11 +137,8 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str],
 
     # Initialize pairs with counts from pretoken_count
     pairs = defaultdict(int)
-
-    for pretoken, count in pretoken_count.items():
-        pairs = update_pairs(pairs, pretoken, count)
-
     pair_to_pretokens = defaultdict(set)
+
     for pretoken, count in pretoken_count.items():
         for i in range(len(pretoken) - 1):
             pair = (pretoken[i], pretoken[i + 1])
@@ -163,8 +160,11 @@ def train_bpe(input_path: str, vocab_size: int, special_tokens: list[str],
 
 
         for old_pretoken in affected_pretokens:
-            new_pretoken = replace_pair_in_tuple(freq_pair, new_token_id, pretoken)
-            pretoken_count[new_pretoken] = pretoken_count.pop(old_pretoken)
+            if old_pretoken not in pretoken_count:
+                continue
+            new_pretoken = replace_pair_in_tuple(freq_pair, new_token_id, old_pretoken)
+            count = pretoken_count.pop(old_pretoken)
+            pretoken_count[new_pretoken] = count
 
             for i in range(len(old_pretoken) - 1):
                 pair = old_pretoken[i:i + 2]
@@ -251,8 +251,11 @@ class Tokenizer:
 
         tokens = []
         for pretoken in pretokens:
-            encoded = self.apply_merges(pretoken)
-            tokens.extend(encoded)
+            if len(pretoken) == 1 and pretoken[0] < len(self.special_tokens):
+                tokens.append(pretoken[0])
+            else:
+                encoded = self.apply_merges(pretoken)
+                tokens.extend(encoded)
         return tokens
         
     def apply_merges(self, pretoken: tuple[int, ...]) -> tuple[int, ...]:
@@ -270,7 +273,13 @@ class Tokenizer:
                 yield token
 
     def decode(self, ids: list[int]) -> str:
-        return b''.join(self.vocab[id] for id in ids).decode('utf-8', errors='replace')
+        res = []
+        for id in ids:
+            if id < len(self.special_tokens):
+                res.append(self.special_tokens[id])
+            else:
+                res.append(self.vocab[id].decode('utf-8', errors='replace'))
+        return ''.join(res)
 
 
 
