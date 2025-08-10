@@ -137,7 +137,7 @@ def replace_pair_in_tuple(
     pretoken_list = list(pretoken)
     i = 0
     while i < len(pretoken_list) - 1:
-        if pretoken[i] == pair[0] and pretoken[i + 1] == pair[1]:
+        if pretoken_list[i] == pair[0] and pretoken_list[i + 1] == pair[1]:
             pretoken_list[i:i + 2] = [new_token_id]
         else:
             i += 1
