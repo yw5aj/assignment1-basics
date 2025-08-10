@@ -231,6 +231,7 @@ class Tokenizer:
         self.vocab = vocab
         self.merges = merges
         self.special_tokens = special_tokens if special_tokens is not None else []
+        self.bytes_to_id = {v: k for k, v in self.vocab.items()}
         
 
     @classmethod
@@ -243,13 +244,29 @@ class Tokenizer:
     
     def encode(self, text: str) -> list[int]:
         pretokens = pretokenize_for_encoding(text, self.special_tokens)
-        pass
-    
+
+        tokens = []
+        for pretoken in pretokens:
+            encoded = self.apply_merges(pretoken)
+            tokens.extend(encoded)
+        return tokens
+        
+    def apply_merges(self, pretoken: tuple[int, ...]) -> tuple[int, ...]:
+        new_pretoken = pretoken
+        for token1, token2 in self.merges:
+            id1, id2 = self.bytes_to_id[token1], self.bytes_to_id[token2]
+            new_token_id = self.bytes_to_id[token1 + token2]
+            new_pretoken = replace_pair_in_tuple((id1, id2), new_token_id, new_pretoken)
+        return new_pretoken
+
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
-        pass
+        for text in iterable:
+            tokens = self.encode(text)
+            for token in tokens:
+                yield token
 
     def decode(self, ids: list[int]) -> str:
-        pass
+        return b''.join(self.vocab[id] for id in ids).decode('utf-8', errors='replace')
 
 
 
@@ -259,6 +276,7 @@ if __name__ == "__main__":
     special_tokens = ["<|endoftext|>"]
     input_path = "data/TinyStoriesV2-GPT4-valid.txt"
     vocab_size = 1024
+    num_processes = 4
 
     vocab, merges = train_bpe(
         input_path=input_path,
